@@ -87,6 +87,10 @@ parser.add_argument('--position_embedding', default='sine', type=str, choices=('
                         help="Type of positional embedding to use on top of the image features")
 parser.add_argument('--hidden_dim', default=512, type=int,
                         help="Size of the embeddings (dimension of the transformer)")
+# added by me
+#parser.add_argument('--style_imgs',')
+# added by me end
+
 args = parser.parse_args()
 
 USE_CUDA = torch.cuda.is_available()

@@ -42,33 +42,47 @@ class Transformer(nn.Module):
             if p.dim() > 1:
                 nn.init.xavier_uniform_(p)
 
-    def forward(self, style, mask , content, pos_embed_c, pos_embed_s):
+    """
+    This method was rewritten by me to allow for multiple styles and to allow for weighting
+    """
+    def forward(self, styles, mask, content, pos_embed_c, pos_embed_s_list, style_img_weights):
 
+        
+        print('Stylizing')
         # content-aware positional embedding
         content_pool = self.averagepooling(content)       
         pos_c = self.new_ps(content_pool)
-        pos_embed_c = F.interpolate(pos_c, mode='bilinear',size= style.shape[-2:])
+        pos_embed_c = F.interpolate(pos_c, mode='bilinear', size=styles[0].shape[-2:])
 
-        ###flatten NxCxHxW to HWxNxC     
-        style = style.flatten(2).permute(2, 0, 1)
-        if pos_embed_s is not None:
-            pos_embed_s = pos_embed_s.flatten(2).permute(2, 0, 1)
-      
         content = content.flatten(2).permute(2, 0, 1)
         if pos_embed_c is not None:
             pos_embed_c = pos_embed_c.flatten(2).permute(2, 0, 1)
-     
-        
-        style = self.encoder_s(style, src_key_padding_mask=mask, pos=pos_embed_s)
+
+        # Styles is a list of tensors
+        combined_style = None
+        for i, style in enumerate(styles):
+            pos_embed_s = pos_embed_s_list[i] if pos_embed_s_list is not None else None
+
+            style = style.flatten(2).permute(2, 0, 1)
+            if pos_embed_s is not None:
+                pos_embed_s = pos_embed_s.flatten(2).permute(2, 0, 1)
+            encoded_style = self.encoder_s(style, src_key_padding_mask=mask, pos=pos_embed_s)
+            # Combine the styles.
+            if combined_style is None:
+                combined_style = encoded_style * style_img_weights[i]
+            else:
+                combined_style += encoded_style * style_img_weights[i]  # adding in weights
+
+        # Proceed with content encoding and decoding as before. Modified to allow for multiple styles
         content = self.encoder_c(content, src_key_padding_mask=mask, pos=pos_embed_c)
-        hs = self.decoder(content, style, memory_key_padding_mask=mask,
-                          pos=pos_embed_s, query_pos=pos_embed_c)[0]
-        
-        ### HWxNxC to NxCxHxW to
-        N, B, C= hs.shape          
+        hs = self.decoder(content, combined_style, memory_key_padding_mask=mask,
+                        pos=pos_embed_s, query_pos=pos_embed_c)[0]
+
+        # Reshape the output as before
+        N, B, C = hs.shape
         H = int(np.sqrt(N))
         hs = hs.permute(1, 2, 0)
-        hs = hs.view(B, C, -1,H)
+        hs = hs.view(B, C, -1, H)
 
         return hs
 
@@ -144,7 +158,7 @@ class TransformerEncoderLayer(nn.Module):
                  activation="relu", normalize_before=False):
         super().__init__()
         self.self_attn = nn.MultiheadAttention(d_model, nhead, dropout=dropout)
-        # Implementation of Feedforward model
+
         self.linear1 = nn.Linear(d_model, dim_feedforward)
         self.dropout = nn.Dropout(dropout)
         self.linear2 = nn.Linear(dim_feedforward, d_model)

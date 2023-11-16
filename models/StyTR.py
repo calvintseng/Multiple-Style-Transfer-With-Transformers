@@ -3,8 +3,11 @@ import torch.nn.functional as F
 from torch import nn
 import numpy as np
 from util import box_ops
+# from util.misc import (NestedTensor, nested_tensor_from_tensor_list,
+#                        accuracy, get_world_size, interpolate,
+#                        is_dist_avail_and_initialized)
 from util.misc import (NestedTensor, nested_tensor_from_tensor_list,
-                       accuracy, get_world_size, interpolate,
+                       accuracy, get_world_size,
                        is_dist_avail_and_initialized)
 from function import normal,normal_style
 from function import calc_mean_std
@@ -156,6 +159,22 @@ class StyTrans(nn.Module):
         hidden_dim = transformer.d_model       
         self.decode = decoder
         self.embedding = PatchEmbed
+        #adding extra information for StyTrans to store
+        """
+        Added by me. Needs additional arguments for extra arguments.
+        """
+        self.args = args #added by me to store args
+
+        self.style_images = args.style
+        self.num_style_images = len(self.style_images)
+        # if args.style_img_weights is None:
+        #     self.style_img_weights = [1.0 / self.num_style_images for _ in range(self.num_style_images)]
+        # else: 
+        self.style_img_weights = args.style_img_weights #handled in test.py
+        #self.style_images = args.style_imgs
+        #self.style_img_weights = args.style_imgs_weights
+        #added by me end
+
 
     def encode_with_intermediate(self, input):
         results = [input]
@@ -165,10 +184,13 @@ class StyTrans(nn.Module):
         return results[1:]
 
     def calc_content_loss(self, input, target):
-      assert (input.size() == target.size())
+      #assert (input.size() == target.size()) #temporararily disabling this line because nestedtensor has no size attribute
       assert (target.requires_grad is False)
       return self.mse_loss(input, target)
 
+    """
+    original author's style loss. I will modify it to allow for multiple styles
+    """
     def calc_style_loss(self, input, target):
         assert (input.size() == target.size())
         assert (target.requires_grad is False)
@@ -176,25 +198,43 @@ class StyTrans(nn.Module):
         target_mean, target_std = calc_mean_std(target)
         return self.mse_loss(input_mean, target_mean) + \
                self.mse_loss(input_std, target_std)
-    def forward(self, samples_c: NestedTensor,samples_s: NestedTensor):
+    """
+    This method was rewritten by me to allow for samples_s. 
+    Calc_style_loss has been rewritten as well as the embedding
+    """
+    def forward(self, samples_c: NestedTensor,samples_s: list[NestedTensor]):
         """ The forward expects a NestedTensor, which consists of:
                - samples.tensor: batched images, of shape [batch_size x 3 x H x W]
                - samples.mask: a binary mask of shape [batch_size x H x W], containing 1 on padded pixels
 
         """
         content_input = samples_c
-        style_input = samples_s
+        style_inputs = samples_s #changed to input(s)
+
+        #style_input = samples_s
         if isinstance(samples_c, (list, torch.Tensor)):
-            samples_c = nested_tensor_from_tensor_list(samples_c)   # support different-sized images padding is used for mask [tensor, mask] 
-        if isinstance(samples_s, (list, torch.Tensor)):
-            samples_s = nested_tensor_from_tensor_list(samples_s) 
-        
+            samples_c = nested_tensor_from_tensor_list(samples_c)   # support different-sized images padding is used for mask [tensor, mask]
+        #made this a loop
+        for i in range(len(samples_s)):
+            if isinstance(samples_s[i], (list, torch.Tensor)):
+                samples_s[i] = nested_tensor_from_tensor_list(samples_s[i]) 
+        """
+        This stuff needs to be changed as well in order to get style loss.
+        """
         # ### features used to calcate loss 
         content_feats = self.encode_with_intermediate(samples_c.tensors)
-        style_feats = self.encode_with_intermediate(samples_s.tensors)
+        #moved style features to be an array
 
+        style_feats_list = []
+
+        for style_img in style_inputs:
+            style_feats_list.append(self.encode_with_intermediate(style_img.tensors))
+
+        #modification end
         ### Linear projection
-        style = self.embedding(samples_s.tensors)
+        #added by me. Puts styles into list
+        styles_list = [self.embedding(style_img.tensors) for style_img in samples_s]
+
         content = self.embedding(samples_c.tensors)
         
         # postional embedding is calculated in transformer.py
@@ -202,29 +242,28 @@ class StyTrans(nn.Module):
         pos_c = None
 
         mask = None
-        hs = self.transformer(style, mask , content, pos_c, pos_s)   
+        hs = self.transformer(styles_list, mask , content, pos_c, pos_s, self.style_img_weights)   #modified to take in style weights as well
         Ics = self.decode(hs)
 
         Ics_feats = self.encode_with_intermediate(Ics)
         loss_c = self.calc_content_loss(normal(Ics_feats[-1]), normal(content_feats[-1]))+self.calc_content_loss(normal(Ics_feats[-2]), normal(content_feats[-2]))
         # Style loss
-        loss_s = self.calc_style_loss(Ics_feats[0], style_feats[0])
-        for i in range(1, 5):
-            loss_s += self.calc_style_loss(Ics_feats[i], style_feats[i])
-            
-        
-        Icc = self.decode(self.transformer(content, mask , content, pos_c, pos_c))
-        Iss = self.decode(self.transformer(style, mask , style, pos_s, pos_s))    
+        """
+        This is where the style loss is calculated. To do multiple styles, I need to add an extra for loop here to enable it. Optional to add layer weights and image weights for each style.
+        Need to get the Ics_feats and style_feats of each image
+        """
+        #modified by me to allow for multiple styles
+        total_loss_s = 0
 
-        #Identity losses lambda 1    
-        loss_lambda1 = self.calc_content_loss(Icc,content_input)+self.calc_content_loss(Iss,style_input)
-        
-        #Identity losses lambda 2
-        Icc_feats=self.encode_with_intermediate(Icc)
-        Iss_feats=self.encode_with_intermediate(Iss)
-        loss_lambda2 = self.calc_content_loss(Icc_feats[0], content_feats[0])+self.calc_content_loss(Iss_feats[0], style_feats[0])
-        for i in range(1, 5):
-            loss_lambda2 += self.calc_content_loss(Icc_feats[i], content_feats[i])+self.calc_content_loss(Iss_feats[i], style_feats[i])
+        for index, style_feats in enumerate(style_feats_list):
+            loss_s = self.calc_style_loss(Ics_feats[0], style_feats[0])
+            for j in range(1,5):
+                loss_s += self.calc_style_loss(Ics_feats[j], style_feats[j])
+            total_loss_s += (loss_s * self.style_img_weights[index])
+
+        total_loss_s /= float(len(self.style_images))
+        #modify end
+
         # Please select and comment out one of the following two sentences
-        return Ics,  loss_c, loss_s, loss_lambda1, loss_lambda2   #train
-        # return Ics    #test 
+        #return Ics,  loss_c, loss_s, loss_lambda1, loss_lambda2   #train
+        return Ics, loss_c, loss_s, 0, 0 
