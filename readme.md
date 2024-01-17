@@ -32,7 +32,7 @@ $ python test.py --content YOUR_CONTENT_PATH --style path_to_style_image1,path_t
 Have the style images separated by commas with no spaces
 The style image weights are float values separated by spaces
 
-2. 
+### Other Info 
   a) The codebase was branched off from the StyTR-2 repository supplied by the paper StyTR2: Image Style Transfer with Transformers. https://github.com/diyiiyiii/StyTR-2
   b) The model files in ./models transformer.py and StyTR.py were modified. The StyTrans class was rewritten by me in the init section and the forward method to allow for multiple styles
 and to take in weights for each style image. The forward method also has the style loss calculation rewritten as the calculations must be different because of multiple style images.
